@@ -31,6 +31,7 @@ import { Feather } from '@expo/vector-icons';
 import type { CameraCapturedPicture } from 'expo-camera';
 import {
   ApiError,
+  analyzeReceipt,
   clearSavedToken,
   createExpense,
   deleteExpense,
@@ -42,7 +43,7 @@ import {
   signIn,
   updateExpense,
 } from './src/api';
-import { formatLocalDate, readReceipt } from './src/receiptOcr';
+import { emptyDraft } from './src/receiptOcr';
 import type { Expense, ExpenseDraft, ExpenseInput } from './src/types';
 
 type MainTab = 'dashboard' | 'camera' | 'expenses' | 'options';
@@ -77,14 +78,9 @@ const categories: CategoryName[] = ['Alimentação', 'Transporte', 'Moradia', 'S
 const paymentMethods = ['PIX', 'Cartão de débito', 'Cartão de crédito', 'Dinheiro', 'Transferência', 'Outro'];
 
 function newDraft(): ExpenseDraft {
-  return {
-    dataDespesa: formatLocalDate(new Date()),
-    descricaoDespesa: '',
-    valorDespesa: '',
-    modalidadePagamento: '',
-    categoriaDespesa: '',
-  };
+  return emptyDraft();
 }
+
 
 function parseLocalDate(value: string): Date | null {
   const match = value.match(/^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/);
@@ -117,15 +113,41 @@ function parseMoney(value: string): number | null {
 }
 
 function draftFromExpense(expense: Expense): ExpenseDraft {
-  const parsed = parseLocalDate(expense.dataDespesa);
+  // Se a data já for uma string válida ou data formatada da API, nós a repassamos diretamente.
+  // Caso a API envie em formato ISO (Ex: 2026-10-29), você pode tratá-la aqui.
+  let dataFormatada = expense.dataDespesa;
+  
+  try {
+    const parsedDate = new Date(expense.dataDespesa);
+    if (!isNaN(parsedDate.getTime())) {
+      dataFormatada = new Intl.DateTimeFormat('pt-BR', { 
+        dateStyle: 'short', 
+        timeStyle: 'medium' 
+      }).format(parsedDate)
+        .replace(',', '');
+    }
+  } catch (e) {
+    // Se falhar por já ser um texto formatado, mantém o valor original
+    dataFormatada = expense.dataDespesa;
+  }
+
+  // Se por acaso a API já mandar a string com a vírgula direto e cair no catch, 
+  // garantimos a remoção limpando-a também no retorno final:
+  if (typeof dataFormatada === 'string') {
+    dataFormatada = dataFormatada.replace(',', '');
+  }
+
   return {
-    dataDespesa: parsed ? formatLocalDate(parsed) : expense.dataDespesa,
+    dataDespesa: dataFormatada,
     descricaoDespesa: expense.descricaoDespesa,
-    valorDespesa: expense.valorDespesa.toFixed(2).replace('.', ','),
+    valorDespesa: typeof expense.valorDespesa === 'number' 
+      ? expense.valorDespesa.toFixed(2).replace('.', ',') 
+      : expense.valorDespesa,
     modalidadePagamento: expense.modalidadePagamento,
     categoriaDespesa: expense.categoriaDespesa,
   };
 }
+
 
 export default function App() {
   const [fontsLoaded] = useFonts({
@@ -146,6 +168,11 @@ export default function App() {
   const [screen, setScreen] = useState<MainTab>('dashboard');
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [listError, setListError] = useState('');
+  const [listLoading, setListLoading] = useState(false);
+  const [selectedMonth, setSelectedMonth] = useState(() => {
+    const today = new Date();
+    return new Date(today.getFullYear(), today.getMonth(), 1);
+  });
   const [query, setQuery] = useState('');
   const [formOpen, setFormOpen] = useState(false);
   const [formError, setFormError] = useState('');
@@ -157,6 +184,7 @@ export default function App() {
   const [scanBusy, setScanBusy] = useState(false);
   const cameraReturnScreen = useRef<MainTab>('dashboard');
   const cameraRef = useRef<CameraView>(null);
+  const expensesRequestId = useRef(0);
 
   useEffect(() => {
     readSavedToken()
@@ -167,22 +195,43 @@ export default function App() {
 
   useEffect(() => {
     if (!token) {
+      expensesRequestId.current += 1;
       setExpenses([]);
+      setListLoading(false);
       return;
     }
-    void refreshExpenses(token);
-  }, [token]);
+    void refreshExpenses(token, selectedMonth);
+  }, [token, selectedMonth]);
 
-  async function refreshExpenses(activeToken = token) {
+  async function refreshExpenses(activeToken = token, month = selectedMonth) {
     if (!activeToken) return;
+    const requestId = ++expensesRequestId.current;
     setListError('');
+    setListLoading(true);
     try {
-      const result = await listExpenses(activeToken);
-      setExpenses(result.data ?? []);
+      const result = await listExpenses(activeToken, month);
+      if (requestId === expensesRequestId.current) setExpenses(result.data ?? []);
     } catch (error) {
-      if (shouldSignOut(error)) await signOut();
-      else setListError(error instanceof Error ? error.message : 'Não foi possível carregar as despesas.');
+      if (requestId === expensesRequestId.current) {
+        if (shouldSignOut(error)) await signOut();
+        else setListError(error instanceof Error ? error.message : 'Não foi possível carregar as despesas.');
+      }
+    } finally {
+      if (requestId === expensesRequestId.current) setListLoading(false);
     }
+  }
+
+  function changeSelectedMonth(offset: number) {
+    expensesRequestId.current += 1;
+    setExpenses([]);
+    setListError('');
+    setListLoading(true);
+    setSelectedMonth(current => {
+      const next = new Date(current.getFullYear(), current.getMonth() + offset, 1);
+      const today = new Date();
+      const currentMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+      return next > currentMonth ? currentMonth : next;
+    });
   }
 
   async function signOut() {
@@ -211,6 +260,10 @@ export default function App() {
   }
 
   function openNewExpense(initialDraft = newDraft(), imageUri: string | null = null) {
+
+    if (initialDraft && typeof initialDraft.dataDespesa === 'string') {
+      initialDraft.dataDespesa = initialDraft.dataDespesa.replace(',', '');
+    }
     setDraft(initialDraft);
     setReceiptUri(imageUri);
     setEditingId(null);
@@ -343,49 +396,24 @@ export default function App() {
     setCameraOpen(true);
   }
 
-async function captureReceipt() {
-  if (!cameraRef.current) return;
-  setScanBusy(true);
-  try {
-    // 1. Tira a foto usando a câmera nativa do aparelho
-    const photo = await cameraRef.current.takePictureAsync({ quality: 0.80 });
-    if (!photo?.uri) throw new Error('A foto não foi capturada.');
-    
-    setCameraOpen(false);
+  async function captureReceipt() {
+    if (!cameraRef.current || scanBusy) return;
+    setScanBusy(true);
+    try {
+      const photo = await cameraRef.current.takePictureAsync({ quality: 0.80 });
+      if (!photo?.uri) throw new Error('A foto não foi capturada.');
 
-    // 2. Prepara a imagem para ser enviada via HTTP para o seu backend
-    const formData = new FormData();
-    formData.append('receipt', {
-      uri: Platform.OS === 'ios' ? photo.uri.replace('file://', '') : photo.uri,
-      type: 'image/jpeg',
-      name: 'receipt.jpg',
-    } as any);
-
-    // 3. Envia para o endpoint da sua API que processa a IA (ex: /despesas/analisar-comprovante)
-    const response = await fetch(`${process.env.EXPO_PUBLIC_API_URL}/despesas/analisar-comprovante`, {
-      method: 'POST',
-      body: formData,
-      headers: {
-        'Content-Type': 'multipart/form-data',
-        'Authorization': `Bearer ${token}`, // Se a sua API exigir o token de login
-      },
-    });
-
-    if (!response.ok) throw new Error('Falha na análise da IA do servidor.');
-
-    const result = await response.json();
-    
-    // 4. Abre o formulário do app com os dados que a IA na nuvem descobriu
-    openNewExpense(result.draft, photo.uri);
-
-  } catch (error) {
-    setCameraOpen(false);
-    setScreen(cameraReturnScreen.current);
-    Alert.alert('Erro no processamento', error instanceof Error ? error.message : 'Tente fotografar novamente.');
-  } finally {
-    setScanBusy(false);
+      const result = await analyzeReceipt(photo.uri);
+      setCameraOpen(false);
+      openNewExpense(result.draft, photo.uri);
+    } catch (error) {
+      setCameraOpen(false);
+      setScreen(cameraReturnScreen.current);
+      Alert.alert('Erro no processamento', error instanceof Error ? error.message : 'Tente fotografar novamente.');
+    } finally {
+      setScanBusy(false);
+    }
   }
-}
 
 
   if (!fontsLoaded || !sessionReady) {
@@ -410,10 +438,10 @@ async function captureReceipt() {
     );
   }
 
-  const now = new Date();
+  const currentMonth = new Date(selectedMonth.getFullYear(), selectedMonth.getMonth(), 1);
   const currentMonthExpenses = expenses.filter(expense => {
     const date = parseLocalDate(expense.dataDespesa);
-    return date && date.getMonth() === now.getMonth() && date.getFullYear() === now.getFullYear();
+    return date && date.getMonth() === currentMonth.getMonth() && date.getFullYear() === currentMonth.getFullYear();
   });
   const totalMonth = currentMonthExpenses.reduce((sum, expense) => sum + expense.valorDespesa, 0);
   const categoryTotals = [...currentMonthExpenses.reduce((totals, expense) => {
@@ -436,7 +464,7 @@ async function captureReceipt() {
       <View style={styles.topBar}>
         <View>
           <Text style={styles.brandEyebrow}>CONTROLE PESSOAL</Text>
-          <Text style={styles.brandTitle}>despesas<Text style={styles.brandDot}>.</Text></Text>
+          <Text style={styles.brandTitle}><Text style={styles.brandDot}>.</Text>despesas<Text style={styles.brandDot}>.</Text></Text>
         </View>
         <View style={styles.headerMark}><Feather name="bar-chart-2" size={18} color={C.gold} /></View>
       </View>
@@ -446,7 +474,7 @@ async function captureReceipt() {
           <ScrollView contentContainerStyle={styles.pageContent} showsVerticalScrollIndicator={false}>
             <View style={styles.headingLine}>
               <View>
-                <Text style={styles.kicker}>{new Intl.DateTimeFormat('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' }).format(now)}</Text>
+                <Text style={styles.kicker}>{new Intl.DateTimeFormat('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date())}</Text>
                 <Text style={styles.pageTitle}>Dashboard</Text>
               </View>
               <View style={styles.avatar}><Feather name="pie-chart" size={19} color={C.ink} /></View>
@@ -458,7 +486,13 @@ async function captureReceipt() {
                 <Feather name="arrow-up-right" size={17} color={C.gold} />
               </View>
               <Text style={styles.balanceValue}>{money(totalMonth)}</Text>
-              <Text style={styles.balanceCaption}>{monthLabel(now)} · {currentMonthExpenses.length} lançamento{currentMonthExpenses.length === 1 ? '' : 's'}</Text>
+              <MonthSelector
+                month={currentMonth}
+                onPrevious={() => changeSelectedMonth(-1)}
+                onNext={() => changeSelectedMonth(1)}
+                nextDisabled={currentMonth.getTime() >= new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime()}
+                suffix={`${currentMonthExpenses.length} lançamento${currentMonthExpenses.length === 1 ? '' : 's'}`}
+              />
               <View style={styles.balanceBottom}>
                 <View style={styles.balanceMeter}><View style={[styles.balanceMeterFill, { width: `${Math.min(100, totalMonth / 3000 * 100)}%` }]} /></View>
                 <Text style={styles.balanceGoal}>meta R$ 3 mil</Text>
@@ -506,20 +540,40 @@ async function captureReceipt() {
               <Pressable onPress={() => setScreen('expenses')}><Text style={styles.textLink}>Ver todas</Text></Pressable>
             </View>
             {listError ? <InlineError message={listError} onRetry={() => void refreshExpenses()} /> : null}
-            {expenses.slice(0, 4).map(expense => (
+            {listLoading ? <ActivityIndicator color={C.coral} style={styles.listLoading} /> : null}
+            {!listLoading && expenses.slice(0, 4).map(expense => (
               <ExpenseRow key={expense.id} expense={expense} onPress={() => void openDetails(expense)} />
             ))}
-            {!expenses.length && !listError && <EmptyState title="Tudo em dia" body="Registre uma despesa ou fotografe um comprovante para começar." />}
+            {!listLoading && !expenses.length && !listError && <EmptyState title="Sem despesas neste mês" body="Registre uma despesa ou fotografe um comprovante para começar." />}
           </ScrollView>
         )}
 
         {screen === 'expenses' && (
           <View style={styles.expensesPage}>
             <View style={styles.expenseHeading}>
-              <View><Text style={styles.kicker}>{expenses.length} lançamento{expenses.length === 1 ? '' : 's'}</Text><Text style={styles.pageTitle}>Despesas</Text></View>
+              <View>
+                <MonthSelector
+                  month={currentMonth}
+                  onPrevious={() => changeSelectedMonth(-1)}
+                  onNext={() => changeSelectedMonth(1)}
+                  nextDisabled={currentMonth.getTime() >= new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime()}
+                />
+                <Text style={styles.pageTitle}>Despesas</Text>
+              </View>
               <Pressable accessibilityLabel="Nova despesa" style={styles.addButton} onPress={() => openNewExpense()}>
                 <Feather name="plus" size={22} color={C.white} />
               </Pressable>
+            </View>
+            <View style={styles.expensesTotal}>
+              <View>
+                <Text style={styles.expensesTotalLabel}>TOTAL DO MÊS</Text>
+                <Text style={styles.expensesTotalCount}>
+                  {currentMonthExpenses.length} lançamento{currentMonthExpenses.length === 1 ? '' : 's'}
+                </Text>
+              </View>
+              {listLoading
+                ? <ActivityIndicator color={C.coral} />
+                : <Text style={styles.expensesTotalValue}>{money(totalMonth)}</Text>}
             </View>
             <View style={styles.searchBox}>
               <Feather name="search" size={17} color={C.muted} />
@@ -528,8 +582,9 @@ async function captureReceipt() {
             </View>
             {listError ? <InlineError message={listError} onRetry={() => void refreshExpenses()} /> : null}
             <ScrollView contentContainerStyle={styles.expenseList} showsVerticalScrollIndicator={false}>
-              {filteredExpenses.map(expense => <ExpenseRow key={expense.id} expense={expense} onPress={() => void openDetails(expense)} />)}
-              {!filteredExpenses.length && !listError && <EmptyState title={query ? 'Nada encontrado' : 'Sem despesas ainda'} body={query ? 'Tente outra busca.' : 'Toque no botão + para adicionar seu primeiro lançamento.'} />}
+              {listLoading ? <ActivityIndicator color={C.coral} style={styles.listLoading} /> : null}
+              {!listLoading && filteredExpenses.map(expense => <ExpenseRow key={expense.id} expense={expense} onPress={() => void openDetails(expense)} />)}
+              {!listLoading && !filteredExpenses.length && !listError && <EmptyState title={query ? 'Nada encontrado' : 'Sem despesas neste mês'} body={query ? 'Tente outra busca.' : 'Toque no botão + para adicionar um lançamento.'} />}
             </ScrollView>
           </View>
         )}
@@ -583,17 +638,17 @@ async function captureReceipt() {
         categories={categoryOptions}
       />
 
-      <Modal visible={cameraOpen} animationType="slide" onRequestClose={closeCamera}>
+      <Modal visible={cameraOpen} animationType="slide" onRequestClose={() => { if (!scanBusy) closeCamera(); }}>
         <View style={styles.cameraScreen}>
           <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" />
           <View style={styles.cameraHeader}>
-            <Pressable accessibilityLabel="Fechar câmera" style={styles.cameraClose} onPress={closeCamera}><Feather name="x" size={22} color={C.white} /></Pressable>
+            <Pressable accessibilityLabel="Fechar câmera" style={styles.cameraClose} onPress={closeCamera} disabled={scanBusy}><Feather name="x" size={22} color={C.white} /></Pressable>
             <View style={styles.cameraTitleWrap}><Text style={styles.cameraTitle}>Comprovante</Text><Text style={styles.cameraSub}>Enquadre o recibo e capture</Text></View>
             <View style={styles.cameraSpacer} />
           </View>
           <View pointerEvents="none" style={styles.scanFrame}><View style={styles.scanCornerTL} /><View style={styles.scanCornerTR} /><View style={styles.scanCornerBL} /><View style={styles.scanCornerBR} /></View>
           <View style={styles.cameraBottom}>
-            <Text style={styles.cameraHint}>A imagem será analisada no aparelho</Text>
+            <Text style={styles.cameraHint}>{scanBusy ? 'Enviando comprovante para análise...' : 'A imagem será analisada após a captura'}</Text>
             <Pressable accessibilityLabel="Fotografar comprovante" style={styles.shutterOuter} onPress={() => void captureReceipt()} disabled={scanBusy}>
               {scanBusy ? <ActivityIndicator color={C.ink} /> : <View style={styles.shutterInner} />}
             </Pressable>
@@ -619,7 +674,7 @@ function LoginScreen(props: {
       <View style={styles.loginHero}>
         <View style={styles.loginMark}><Feather name="activity" size={22} color={C.ink} /></View>
         <Text style={styles.loginOverline}>CONTROLE PESSOAL</Text>
-        <Text style={styles.loginBrand}>despesas<Text style={{ color: C.gold }}>.</Text></Text>
+        <Text style={styles.loginBrand}><Text style={{ color: C.gold }}>.</Text>Despesas<Text style={{ color: C.gold }}>.</Text></Text>
         <View style={styles.loginAccentLine} />
         <Text style={styles.loginDate}>{new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' }).format(new Date())}</Text>
         <View style={styles.loginOrbitOne} /><View style={styles.loginOrbitTwo} />
@@ -647,6 +702,42 @@ function TabButton(props: { label: string; icon: keyof typeof Feather.glyphMap; 
       <Feather name={props.icon} size={21} color={props.active ? C.coral : C.muted} />
       <Text style={[styles.tabLabel, props.active && styles.activeTabLabel]}>{props.label}</Text>
     </Pressable>
+  );
+}
+
+function MonthSelector(props: {
+  month: Date;
+  onPrevious: () => void;
+  onNext: () => void;
+  nextDisabled: boolean;
+  suffix?: string;
+}) {
+  return (
+    <View style={styles.monthSelector}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Mês anterior"
+        hitSlop={6}
+        style={styles.monthArrow}
+        onPress={props.onPrevious}
+      >
+        <Feather name="chevron-left" size={16} color={C.coral} />
+      </Pressable>
+      <Text numberOfLines={1} style={styles.monthSelectorText}>
+        {monthLabel(props.month)}{props.suffix ? ` · ${props.suffix}` : ''}
+      </Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Próximo mês"
+        accessibilityState={{ disabled: props.nextDisabled }}
+        hitSlop={6}
+        style={styles.monthArrow}
+        onPress={props.onNext}
+        disabled={props.nextDisabled}
+      >
+        <Feather name="chevron-right" size={16} color={props.nextDisabled ? C.muted : C.coral} />
+      </Pressable>
+    </View>
   );
 }
 
@@ -830,6 +921,10 @@ const styles = StyleSheet.create({
   balanceLabel: { color: '#B4C9BC', fontFamily: 'DMSans_700Bold', fontSize: 10, letterSpacing: 1.5 },
   balanceValue: { color: C.white, fontFamily: 'SpaceGrotesk_700Bold', fontSize: 36, marginTop: 10 },
   balanceCaption: { color: '#B9CBBF', fontFamily: 'DMSans_400Regular', fontSize: 12, marginTop: 2, textTransform: 'capitalize' },
+  monthSelector: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', maxWidth: '100%', marginTop: 2 },
+  monthArrow: { width: 22, height: 24, alignItems: 'center', justifyContent: 'center' },
+  monthSelectorText: { flexShrink: 1, color: '#B9CBBF', fontFamily: 'DMSans_400Regular', fontSize: 12, textTransform: 'capitalize' },
+  listLoading: { marginTop: 24 },
   balanceBottom: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 20 },
   balanceMeter: { flex: 1, height: 5, borderRadius: 3, backgroundColor: '#416257', overflow: 'hidden' },
   balanceMeterFill: { height: '100%', borderRadius: 3, backgroundColor: C.gold },
@@ -860,6 +955,10 @@ const styles = StyleSheet.create({
   expensesPage: { flex: 1, paddingHorizontal: 22, paddingTop: 23 },
   expenseHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
   addButton: { height: 45, width: 45, backgroundColor: C.coral, alignItems: 'center', justifyContent: 'center', borderRadius: 23 },
+  expensesTotal: { minHeight: 68, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 15, marginBottom: 14, borderRadius: 9, backgroundColor: C.mint },
+  expensesTotalLabel: { color: C.muted, fontFamily: 'DMSans_700Bold', fontSize: 9, letterSpacing: 1.2 },
+  expensesTotalCount: { color: C.muted, fontFamily: 'DMSans_400Regular', fontSize: 11, marginTop: 3 },
+  expensesTotalValue: { color: C.ink, fontFamily: 'SpaceGrotesk_700Bold', fontSize: 20 },
   searchBox: { height: 44, borderWidth: 1, borderColor: C.line, backgroundColor: C.white, borderRadius: 8, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 9, marginBottom: 14 },
   searchInput: { flex: 1, color: C.ink, fontFamily: 'DMSans_400Regular', fontSize: 13, height: 42 },
   expenseList: { paddingBottom: 24 },

@@ -1,7 +1,10 @@
 import * as SecureStore from 'expo-secure-store';
-import type { Expense, ExpenseCollection, ExpenseInput } from './types';
+import { Platform } from 'react-native';
+import type { Expense, ExpenseCollection, ExpenseDraft, ExpenseInput } from './types';
 
-const apiUrl = (process.env.EXPO_PUBLIC_API_URL ?? 'http://10.0.2.2:5164').replace(/\/$/, '');
+// const apiUrl = (process.env.EXPO_PUBLIC_API_URL ?? 'http://10.0.2.2:5164').replace(/\/$/, '');
+// const apiUrl = (process.env.EXPO_PUBLIC_API_URL ?? 'http://192.168.0.4:5164').replace(/\/$/, '');
+const apiUrl = (process.env.EXPO_PUBLIC_API_URL ?? 'http://192.168.0.5:5164').replace(/\/$/, '');
 const tokenKey = 'despesas.jwt';
 
 export class ApiError extends Error {
@@ -18,6 +21,7 @@ async function request<T>(path: string, token?: string, init: RequestInit = {}):
   let response: Response;
 
   try {
+    console.log(`Requesting ${apiUrl}${path}`);
     response = await fetch(`${apiUrl}${path}`, {
       ...init,
       headers: {
@@ -62,8 +66,23 @@ export async function signIn(email: string, senha: string): Promise<string> {
 export const readSavedToken = () => SecureStore.getItemAsync(tokenKey);
 export const clearSavedToken = () => SecureStore.deleteItemAsync(tokenKey);
 
-export function listExpenses(token: string): Promise<ExpenseCollection> {
-  return request('/despesas?page=1&pageSize=100', token);
+export async function listExpenses(token: string, selectedMonth: Date): Promise<ExpenseCollection> {
+  const year = selectedMonth.getFullYear();
+  const month = selectedMonth.getMonth() + 1;
+  const query = `year=${year}&month=${month}`;
+  const firstPage = await request<ExpenseCollection>(`/despesas?page=1&pageSize=100&${query}`, token);
+  const remainingPages: ExpenseCollection[] = [];
+
+  for (let page = 2; page <= firstPage.pagination.totalPages; page += 1) {
+    remainingPages.push(
+      await request<ExpenseCollection>(`/despesas?page=${page}&pageSize=100&${query}`, token),
+    );
+  }
+
+  return {
+    ...firstPage,
+    data: [firstPage, ...remainingPages].flatMap(result => result.data),
+  };
 }
 
 export function getExpense(token: string, id: string): Promise<{ data: Expense }> {
@@ -84,6 +103,46 @@ export function patchExpense(token: string, id: string, changes: Partial<Expense
 
 export function deleteExpense(token: string, id: string): Promise<void> {
   return request(`/despesas/${id}`, token, { method: 'DELETE' });
+}
+
+export async function analyzeReceipt(imageUri: string): Promise<{ draft: ExpenseDraft }> {
+  const formData = new FormData();
+  formData.append('receipt', {
+    uri: Platform.OS === 'ios' ? imageUri.replace('file://', '') : imageUri,
+    type: 'image/jpeg',
+    name: 'receipt.jpg',
+  } as any);
+
+  let response: Response;
+  try {
+    response = await fetch(`${apiUrl}/despesas/analisar-comprovante`, {
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+      body: formData,
+    });
+  } catch {
+    throw new ApiError('Não foi possível conectar à API. Confira o endereço e a rede.', 0);
+  }
+
+  const body = await response.json().catch(() => null) as {
+    draft?: ExpenseDraft;
+    message?: string;
+    detail?: string;
+    title?: string;
+  } | null;
+
+  if (!response.ok) {
+    throw new ApiError(
+      body?.message ?? body?.detail ?? body?.title ?? 'Não foi possível analisar o comprovante.',
+      response.status,
+    );
+  }
+
+  if (!body?.draft) {
+    throw new ApiError('A resposta da análise não contém um rascunho de despesa.', response.status);
+  }
+
+  return { draft: body.draft };
 }
 
 export function shouldSignOut(error: unknown): boolean {
