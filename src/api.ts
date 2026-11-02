@@ -1,10 +1,8 @@
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
+import { getApiUrl } from './config';
 import type { Expense, ExpenseCollection, ExpenseDraft, ExpenseInput } from './types';
 
-// const apiUrl = (process.env.EXPO_PUBLIC_API_URL ?? 'http://10.0.2.2:5164').replace(/\/$/, '');
-// const apiUrl = (process.env.EXPO_PUBLIC_API_URL ?? 'http://192.168.0.4:5164').replace(/\/$/, '');
-const apiUrl = (process.env.EXPO_PUBLIC_API_URL ?? 'http://192.168.0.5:5164').replace(/\/$/, '');
 const tokenKey = 'despesas.jwt';
 
 export class ApiError extends Error {
@@ -21,8 +19,7 @@ async function request<T>(path: string, token?: string, init: RequestInit = {}):
   let response: Response;
 
   try {
-    console.log(`Requesting ${apiUrl}${path}`);
-    response = await fetch(`${apiUrl}${path}`, {
+    response = await fetch(`${getApiUrl()}${path}`, {
       ...init,
       headers: {
         Accept: 'application/json',
@@ -115,7 +112,7 @@ export async function analyzeReceipt(imageUri: string): Promise<{ draft: Expense
 
   let response: Response;
   try {
-    response = await fetch(`${apiUrl}/despesas/analisar-comprovante`, {
+    response = await fetch(`${getApiUrl()}/despesas/analisar-comprovante`, {
       method: 'POST',
       headers: { Accept: 'application/json' },
       body: formData,

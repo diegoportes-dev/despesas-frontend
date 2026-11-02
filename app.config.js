@@ -1,4 +1,4 @@
-const apiUrl = process.env.EXPO_PUBLIC_API_URL ?? 'http://10.0.2.2:5164';
+const apiUrl = process.env.EXPO_PUBLIC_API_URL ?? 'http://despesas.runasp.net';
 const isHttpApi = apiUrl.startsWith('http://');
 
 module.exports = {
@@ -7,6 +7,7 @@ module.exports = {
     slug: 'despesas-mobile',
     scheme: 'despesas',
     version: '1.0.0',
+    icon: './assets/icon.png',
     orientation: 'portrait',
     userInterfaceStyle: 'light',
     ios: {
@@ -24,7 +25,8 @@ module.exports = {
       package: 'com.diegoportes.desposasmobile',
       permissions: ['CAMERA'],
       adaptiveIcon: {
-        backgroundColor: '#F4F1E8',
+        foregroundImage: './assets/icon.png',
+        backgroundColor: '#073D2B',
       },
     },
     plugins: [

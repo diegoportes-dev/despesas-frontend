@@ -17,11 +17,15 @@ Instale as dependências na pasta `Frontend`:
 npm install
 ```
 
-Copie `.env.example` para `.env` e configure `EXPO_PUBLIC_API_URL`:
+Copie `.env.example` para `.env`. Por padrão, o app acessa `http://despesas.runasp.net`.
+Para apontar para outro servidor, altere `EXPO_PUBLIC_API_URL` no `.env`:
 
 - Emulador Android: `http://10.0.2.2:5164`.
 - Emulador iOS: `http://127.0.0.1:5164`.
-- Aparelho físico: use o IP da máquina que executa a API, por exemplo `http://192.168.0.20:5164`.
+- Aparelho físico na rede local: use o IP da máquina que executa a API, por exemplo `http://192.168.0.20:5164`.
+
+O endereço também pode ser definido diretamente no módulo [src/config.ts](./src/config.ts). Ao alterar a URL no `.env`, reinicie o Expo para que a configuração seja aplicada.
+No aplicativo, edite o endereço em **Opções > Conexão**; a configuração fica salva no aparelho e também pode ser acessada na tela de login. Ao trocar a API durante uma sessão, será necessário entrar novamente.
 
 Para acessar a API por um aparelho físico, execute-a escutando na rede local, por exemplo:
 
@@ -56,6 +60,7 @@ npm run typecheck
 
 - Login em `POST /login`; o JWT fica no armazenamento seguro do aparelho.
 - Home e dashboard calculados a partir de `GET /despesas`.
+- Atualização de dashboard e despesas ao arrastar a tela para baixo.
 - Criar, consultar, atualizar, alterar categoria e excluir despesas por meio de `POST`, `GET`, `PUT`, `PATCH` e `DELETE /despesas`.
 - Captura do comprovante e OCR local para sugerir descrição, data, valor, pagamento e categoria. Os campos podem ser revisados antes de salvar.
 

@@ -7,6 +7,7 @@ import {
   Modal,
   Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -29,6 +30,7 @@ import {
 } from '@expo-google-fonts/space-grotesk';
 import { Feather } from '@expo/vector-icons';
 import type { CameraCapturedPicture } from 'expo-camera';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   ApiError,
   analyzeReceipt,
@@ -43,6 +45,7 @@ import {
   signIn,
   updateExpense,
 } from './src/api';
+import { getApiUrl, loadApiUrl, saveApiUrl } from './src/config';
 import { emptyDraft } from './src/receiptOcr';
 import type { Expense, ExpenseDraft, ExpenseInput } from './src/types';
 
@@ -150,6 +153,15 @@ function draftFromExpense(expense: Expense): ExpenseDraft {
 
 
 export default function App() {
+  return (
+    <SafeAreaProvider>
+      <AppContent />
+    </SafeAreaProvider>
+  );
+}
+
+function AppContent() {
+  const insets = useSafeAreaInsets();
   const [fontsLoaded] = useFonts({
     DMSans_400Regular,
     DMSans_500Medium,
@@ -161,6 +173,11 @@ export default function App() {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [token, setToken] = useState<string | null>(null);
   const [sessionReady, setSessionReady] = useState(false);
+  const [apiAddress, setApiAddress] = useState(getApiUrl());
+  const [apiUrlDraft, setApiUrlDraft] = useState(getApiUrl());
+  const [apiSettingsOpen, setApiSettingsOpen] = useState(false);
+  const [apiSettingsSaving, setApiSettingsSaving] = useState(false);
+  const [apiSettingsError, setApiSettingsError] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
@@ -169,6 +186,7 @@ export default function App() {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [listError, setListError] = useState('');
   const [listLoading, setListLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState(() => {
     const today = new Date();
     return new Date(today.getFullYear(), today.getMonth(), 1);
@@ -187,10 +205,28 @@ export default function App() {
   const expensesRequestId = useRef(0);
 
   useEffect(() => {
-    readSavedToken()
-      .then(setToken)
-      .catch(() => setToken(null))
-      .finally(() => setSessionReady(true));
+    let active = true;
+
+    async function loadSession() {
+      try {
+        const [savedToken, savedApiUrl] = await Promise.all([readSavedToken(), loadApiUrl()]);
+        if (active) {
+          setToken(savedToken);
+          setApiAddress(savedApiUrl);
+          setApiUrlDraft(savedApiUrl);
+        }
+      } catch (error) {
+        Alert.alert(
+          'Não foi possível carregar as configurações',
+          error instanceof Error ? error.message : 'Feche e abra o aplicativo novamente.',
+        );
+      } finally {
+        if (active) setSessionReady(true);
+      }
+    }
+
+    void loadSession();
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
@@ -198,16 +234,18 @@ export default function App() {
       expensesRequestId.current += 1;
       setExpenses([]);
       setListLoading(false);
+      setRefreshing(false);
       return;
     }
     void refreshExpenses(token, selectedMonth);
   }, [token, selectedMonth]);
 
-  async function refreshExpenses(activeToken = token, month = selectedMonth) {
+  async function refreshExpenses(activeToken = token, month = selectedMonth, pullToRefresh = false) {
     if (!activeToken) return;
     const requestId = ++expensesRequestId.current;
     setListError('');
-    setListLoading(true);
+    if (pullToRefresh) setRefreshing(true);
+    else setListLoading(true);
     try {
       const result = await listExpenses(activeToken, month);
       if (requestId === expensesRequestId.current) setExpenses(result.data ?? []);
@@ -217,7 +255,10 @@ export default function App() {
         else setListError(error instanceof Error ? error.message : 'Não foi possível carregar as despesas.');
       }
     } finally {
-      if (requestId === expensesRequestId.current) setListLoading(false);
+      if (requestId === expensesRequestId.current) {
+        setListLoading(false);
+        setRefreshing(false);
+      }
     }
   }
 
@@ -239,6 +280,34 @@ export default function App() {
     setToken(null);
     setPassword('');
     setScreen('dashboard');
+  }
+
+  function openApiSettings() {
+    setApiUrlDraft(apiAddress);
+    setApiSettingsError('');
+    setApiSettingsOpen(true);
+  }
+
+  async function saveApiSettings() {
+    setApiSettingsSaving(true);
+    setApiSettingsError('');
+
+    try {
+      const previousApiUrl = getApiUrl();
+      const savedApiUrl = await saveApiUrl(apiUrlDraft);
+      setApiAddress(savedApiUrl);
+      setApiUrlDraft(savedApiUrl);
+      setApiSettingsOpen(false);
+
+      if (token && previousApiUrl !== savedApiUrl) {
+        await signOut();
+        Alert.alert('API atualizada', 'Entre novamente para acessar a API configurada.');
+      }
+    } catch (error) {
+      setApiSettingsError(error instanceof Error ? error.message : 'Não foi possível salvar o endereço da API.');
+    } finally {
+      setApiSettingsSaving(false);
+    }
   }
 
   async function handleLogin() {
@@ -431,9 +500,17 @@ export default function App() {
         password={password}
         error={loginError}
         loading={loading}
+        apiSettingsVisible={apiSettingsOpen}
+        apiUrl={apiUrlDraft}
+        apiSettingsSaving={apiSettingsSaving}
+        apiSettingsError={apiSettingsError}
         onEmail={setEmail}
         onPassword={setPassword}
         onSubmit={handleLogin}
+        onOpenApiSettings={openApiSettings}
+        onCloseApiSettings={() => setApiSettingsOpen(false)}
+        onChangeApiUrl={setApiUrlDraft}
+        onSaveApiSettings={() => void saveApiSettings()}
       />
     );
   }
@@ -471,7 +548,19 @@ export default function App() {
 
       <View style={styles.contentWrap}>
         {screen === 'dashboard' && (
-          <ScrollView contentContainerStyle={styles.pageContent} showsVerticalScrollIndicator={false}>
+          <ScrollView
+            contentContainerStyle={styles.pageContent}
+            showsVerticalScrollIndicator={false}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={() => void refreshExpenses(token, selectedMonth, true)}
+                tintColor={C.coral}
+                colors={[C.coral]}
+                progressBackgroundColor={C.white}
+              />
+            }
+          >
             <View style={styles.headingLine}>
               <View>
                 <Text style={styles.kicker}>{new Intl.DateTimeFormat('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date())}</Text>
@@ -581,7 +670,19 @@ export default function App() {
               {query ? <Pressable onPress={() => setQuery('')} accessibilityLabel="Limpar busca"><Feather name="x" size={16} color={C.muted} /></Pressable> : null}
             </View>
             {listError ? <InlineError message={listError} onRetry={() => void refreshExpenses()} /> : null}
-            <ScrollView contentContainerStyle={styles.expenseList} showsVerticalScrollIndicator={false}>
+            <ScrollView
+              contentContainerStyle={styles.expenseList}
+              showsVerticalScrollIndicator={false}
+              refreshControl={
+                <RefreshControl
+                  refreshing={refreshing}
+                  onRefresh={() => void refreshExpenses(token, selectedMonth, true)}
+                  tintColor={C.coral}
+                  colors={[C.coral]}
+                  progressBackgroundColor={C.white}
+                />
+              }
+            >
               {listLoading ? <ActivityIndicator color={C.coral} style={styles.listLoading} /> : null}
               {!listLoading && filteredExpenses.map(expense => <ExpenseRow key={expense.id} expense={expense} onPress={() => void openDetails(expense)} />)}
               {!listLoading && !filteredExpenses.length && !listError && <EmptyState title={query ? 'Nada encontrado' : 'Sem despesas neste mês'} body={query ? 'Tente outra busca.' : 'Toque no botão + para adicionar um lançamento.'} />}
@@ -600,6 +701,15 @@ export default function App() {
                 <Text numberOfLines={1} style={styles.accountEmail}>{email}</Text>
               </View>
             </View>
+            <Text style={styles.sectionTitle}>Conexão</Text>
+            <Pressable accessibilityRole="button" style={styles.apiSettingsRow} onPress={openApiSettings}>
+              <View style={styles.apiSettingsGlyph}><Feather name="globe" size={18} color={C.ink} /></View>
+              <View style={styles.apiSettingsInfo}>
+                <Text style={styles.apiSettingsLabel}>ENDEREÇO DA API</Text>
+                <Text numberOfLines={1} style={styles.apiSettingsUrl}>{apiAddress}</Text>
+              </View>
+              <Feather name="chevron-right" size={17} color={C.muted} />
+            </Pressable>
             <Pressable style={styles.logoutRow} onPress={() => void signOut()}>
               <View style={styles.logoutGlyph}><Feather name="log-out" size={17} color={C.error} /></View>
               <Text style={styles.logoutText}>Sair da conta</Text>
@@ -609,7 +719,15 @@ export default function App() {
         )}
       </View>
 
-      <View style={styles.tabBar}>
+      <View
+        style={[
+          styles.tabBar,
+          {
+            height: Platform.OS === 'ios' ? 94 : 72 + insets.bottom,
+            paddingBottom: Platform.OS === 'ios' ? Math.max(27, insets.bottom) : 6 + insets.bottom,
+          },
+        ]}
+      >
         <TabButton label="Dashboard" icon="bar-chart-2" active={screen === 'dashboard'} onPress={() => setScreen('dashboard')} />
         <TabButton label="Câmera de foto" icon="camera" active={screen === 'camera'} onPress={() => void startCamera()} />
         <TabButton label="Despesas" icon="file-text" active={screen === 'expenses'} onPress={() => setScreen('expenses')} />
@@ -647,7 +765,7 @@ export default function App() {
             <View style={styles.cameraSpacer} />
           </View>
           <View pointerEvents="none" style={styles.scanFrame}><View style={styles.scanCornerTL} /><View style={styles.scanCornerTR} /><View style={styles.scanCornerBL} /><View style={styles.scanCornerBR} /></View>
-          <View style={styles.cameraBottom}>
+          <View style={[styles.cameraBottom, { paddingBottom: (Platform.OS === 'ios' ? 52 : 32) + insets.bottom }]}>
             <Text style={styles.cameraHint}>{scanBusy ? 'Enviando comprovante para análise...' : 'A imagem será analisada após a captura'}</Text>
             <Pressable accessibilityLabel="Fotografar comprovante" style={styles.shutterOuter} onPress={() => void captureReceipt()} disabled={scanBusy}>
               {scanBusy ? <ActivityIndicator color={C.ink} /> : <View style={styles.shutterInner} />}
@@ -664,10 +782,20 @@ function LoginScreen(props: {
   password: string;
   error: string;
   loading: boolean;
+  apiSettingsVisible: boolean;
+  apiUrl: string;
+  apiSettingsSaving: boolean;
+  apiSettingsError: string;
   onEmail: (value: string) => void;
   onPassword: (value: string) => void;
   onSubmit: () => void;
+  onOpenApiSettings: () => void;
+  onCloseApiSettings: () => void;
+  onChangeApiUrl: (value: string) => void;
+  onSaveApiSettings: () => void;
 }) {
+  const insets = useSafeAreaInsets();
+
   return (
     <KeyboardAvoidingView style={styles.loginRoot} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <ExpoStatusBar style="light" />
@@ -679,7 +807,10 @@ function LoginScreen(props: {
         <Text style={styles.loginDate}>{new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' }).format(new Date())}</Text>
         <View style={styles.loginOrbitOne} /><View style={styles.loginOrbitTwo} />
       </View>
-      <ScrollView contentContainerStyle={styles.loginBody} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        contentContainerStyle={[styles.loginBody, { paddingBottom: 25 + insets.bottom }]}
+        keyboardShouldPersistTaps="handled"
+      >
         <Text style={styles.loginHeading}>Entre na sua conta</Text>
         <Text style={styles.loginSubheading}>Suas despesas, em ordem.</Text>
         <Text style={styles.inputLabel}>E-MAIL</Text>
@@ -690,9 +821,84 @@ function LoginScreen(props: {
         <Pressable disabled={props.loading} style={[styles.loginButton, props.loading && styles.disabledButton]} onPress={props.onSubmit}>
           {props.loading ? <ActivityIndicator color={C.white} /> : <><Text style={styles.loginButtonText}>Entrar</Text><Feather name="arrow-right" size={18} color={C.white} /></>}
         </Pressable>
+        <Pressable accessibilityRole="button" style={styles.loginSettingsButton} onPress={props.onOpenApiSettings}>
+          <Feather name="settings" size={15} color={C.ink} />
+          <Text style={styles.loginSettingsText}>Configurar endereço da API</Text>
+        </Pressable>
         <Text style={styles.loginFoot}>Acesso protegido pela API de despesas</Text>
       </ScrollView>
+      <ApiSettingsModal
+        visible={props.apiSettingsVisible}
+        apiUrl={props.apiUrl}
+        saving={props.apiSettingsSaving}
+        error={props.apiSettingsError}
+        onChangeApiUrl={props.onChangeApiUrl}
+        onClose={props.onCloseApiSettings}
+        onSave={props.onSaveApiSettings}
+      />
     </KeyboardAvoidingView>
+  );
+}
+
+function ApiSettingsModal(props: {
+  visible: boolean;
+  apiUrl: string;
+  saving: boolean;
+  error: string;
+  onChangeApiUrl: (value: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  const insets = useSafeAreaInsets();
+
+  return (
+    <Modal visible={props.visible} animationType="slide" onRequestClose={props.onClose}>
+      <KeyboardAvoidingView style={styles.modalRoot} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <ExpoStatusBar style="dark" />
+        <View style={styles.modalHeader}>
+          <Pressable accessibilityLabel="Voltar" style={styles.backButton} onPress={props.onClose}>
+            <Feather name="arrow-left" size={20} color={C.ink} />
+          </Pressable>
+          <View style={styles.modalTitleWrap}>
+            <Text style={styles.modalKicker}>PREFERÊNCIAS</Text>
+            <Text style={styles.modalTitle}>Endereço da API</Text>
+          </View>
+          <View style={{ width: 42 }} />
+        </View>
+        <ScrollView
+          contentContainerStyle={[styles.formContent, { paddingBottom: 38 + insets.bottom }]}
+          keyboardShouldPersistTaps="handled"
+        >
+          <Text style={styles.formIntro}>Informe o endereço base usado para acessar seus dados.</Text>
+          <Text style={styles.inputLabel}>URL DA API</Text>
+          <View style={styles.fieldBox}>
+            <TextInput
+              value={props.apiUrl}
+              onChangeText={props.onChangeApiUrl}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              placeholder="http://despesas.runasp.net"
+              placeholderTextColor="#8D9A92"
+              style={styles.fieldInput}
+              accessibilityLabel="Endereço da API"
+            />
+          </View>
+          <Text style={styles.apiSettingsHint}>Use um endereço HTTP ou HTTPS, sem barra no final.</Text>
+          {props.error ? <Text accessibilityRole="alert" style={styles.formError}>{props.error}</Text> : null}
+          <Pressable
+            accessibilityRole="button"
+            disabled={props.saving}
+            style={[styles.saveButton, props.saving && styles.disabledButton]}
+            onPress={props.onSave}
+          >
+            {props.saving
+              ? <ActivityIndicator color={C.white} />
+              : <><Feather name="check" size={18} color={C.white} /><Text style={styles.saveButtonText}>Salvar endereço</Text></>}
+          </Pressable>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </Modal>
   );
 }
 
@@ -788,6 +994,8 @@ function ExpenseFormModal(props: {
   onChange: (draft: ExpenseDraft) => void;
   onSave: () => void;
 }) {
+  const insets = useSafeAreaInsets();
+
   function update<K extends keyof ExpenseDraft>(key: K, value: ExpenseDraft[K]) {
     props.onChange({ ...props.draft, [key]: value });
   }
@@ -801,7 +1009,11 @@ function ExpenseFormModal(props: {
           <View style={styles.modalTitleWrap}><Text style={styles.modalKicker}>{props.editing ? 'ATUALIZAÇÃO' : 'NOVO LANÇAMENTO'}</Text><Text style={styles.modalTitle}>{props.editing ? 'Editar despesa' : 'Adicionar despesa'}</Text></View>
           <View style={{ width: 42 }} />
         </View>
-        <ScrollView contentContainerStyle={styles.formContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+        <ScrollView
+          contentContainerStyle={[styles.formContent, { paddingBottom: 38 + insets.bottom }]}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
           {props.imageUri ? <View style={styles.receiptPreview}><Image source={{ uri: props.imageUri }} style={styles.receiptImage} /><View style={styles.receiptOverlay}><Feather name="check-circle" size={16} color={C.white} /><Text style={styles.receiptOverlayText}>Leitura sugerida</Text></View></View> : null}
           <Text style={styles.formIntro}>{props.editing ? 'Atualize os dados do lançamento.' : 'Revise os dados antes de salvar.'}</Text>
           <FormField label="DATA E HORA" value={props.draft.dataDespesa} onChangeText={value => update('dataDespesa', value)} placeholder="24/10/2026 12:34:23" keyboardType="numbers-and-punctuation" />
@@ -862,13 +1074,14 @@ function ExpenseDetailsModal(props: {
   onDelete: (expense: Expense) => void;
   onChangeCategory: (expense: Expense, category: string) => void;
 }) {
+  const insets = useSafeAreaInsets();
   const expense = props.expense;
   return (
     <Modal visible={Boolean(expense)} transparent animationType="fade" onRequestClose={props.onClose}>
       <View style={styles.detailScrim}>
         <Pressable style={StyleSheet.absoluteFill} onPress={props.onClose} accessibilityLabel="Fechar detalhes" />
         {expense ? (
-          <View style={styles.detailSheet}>
+          <View style={[styles.detailSheet, { paddingBottom: Platform.OS === 'ios' ? Math.max(30, insets.bottom) : 18 + insets.bottom }]}>
             <View style={styles.sheetHandle} />
             <View style={styles.detailHeader}>
               <View style={[styles.detailGlyph, { backgroundColor: `${categoryColors[expense.categoriaDespesa] ?? C.muted}20` }]}><Feather name="file-text" size={20} color={categoryColors[expense.categoriaDespesa] ?? C.muted} /></View>
@@ -949,6 +1162,11 @@ const styles = StyleSheet.create({
   accountInfo: { flex: 1, minWidth: 0 },
   accountLabel: { color: C.muted, fontFamily: 'DMSans_700Bold', fontSize: 8, letterSpacing: 1.2 },
   accountEmail: { color: C.ink, fontFamily: 'DMSans_500Medium', fontSize: 13, marginTop: 4 },
+  apiSettingsRow: { minHeight: 66, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 12, marginTop: 10, marginBottom: 16, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 8 },
+  apiSettingsGlyph: { width: 38, height: 38, borderRadius: 19, backgroundColor: C.mint, alignItems: 'center', justifyContent: 'center' },
+  apiSettingsInfo: { flex: 1, minWidth: 0 },
+  apiSettingsLabel: { color: C.muted, fontFamily: 'DMSans_700Bold', fontSize: 8, letterSpacing: 1.1 },
+  apiSettingsUrl: { color: C.ink, fontFamily: 'DMSans_500Medium', fontSize: 12, marginTop: 4 },
   logoutRow: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, borderRadius: 8 },
   logoutGlyph: { width: 31, height: 31, borderRadius: 16, backgroundColor: C.coralLight, alignItems: 'center', justifyContent: 'center' },
   logoutText: { flex: 1, color: C.error, fontFamily: 'DMSans_700Bold', fontSize: 13 },
@@ -1006,6 +1224,8 @@ const styles = StyleSheet.create({
   loginInput: { flex: 1, minWidth: 0, color: C.ink, fontFamily: 'DMSans_400Regular', fontSize: 14, height: 48 },
   loginButton: { height: 50, backgroundColor: C.coral, borderRadius: 7, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 17, marginTop: 20 },
   loginButtonText: { color: C.white, fontFamily: 'DMSans_700Bold', fontSize: 14 },
+  loginSettingsButton: { minHeight: 46, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 9, borderRadius: 7, borderWidth: 1, borderColor: C.line, backgroundColor: C.white },
+  loginSettingsText: { color: C.ink, fontFamily: 'DMSans_500Medium', fontSize: 12 },
   loginFoot: { color: C.muted, fontFamily: 'DMSans_400Regular', fontSize: 10, textAlign: 'center', marginTop: 16 },
   disabledButton: { opacity: 0.65 },
   modalRoot: { flex: 1, backgroundColor: C.paper },
@@ -1016,6 +1236,7 @@ const styles = StyleSheet.create({
   modalTitle: { color: C.ink, fontFamily: 'SpaceGrotesk_700Bold', fontSize: 18, marginTop: 2 },
   formContent: { paddingHorizontal: 21, paddingTop: 18, paddingBottom: 38 },
   formIntro: { color: C.muted, fontFamily: 'DMSans_400Regular', fontSize: 12, marginBottom: 8 },
+  apiSettingsHint: { color: C.muted, fontFamily: 'DMSans_400Regular', fontSize: 11, lineHeight: 16, marginTop: 8 },
   formField: { marginTop: 1 },
   fieldBox: { minHeight: 46, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: C.white, borderColor: C.line, borderWidth: 1, borderRadius: 7, paddingHorizontal: 12 },
   fieldPrefix: { color: C.muted, fontFamily: 'DMSans_700Bold', fontSize: 12 },

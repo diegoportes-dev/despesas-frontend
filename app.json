@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "Despesas Control",
+    "slug": "despesas ctl",
+    "version": "1.0.0",
+    "android": {
+      "package": "com.seuusuario.despesas",
+      "adaptiveIcon": {
+        "backgroundColor": "#ffffff"
+      }
+    }
+  }
+}
